@@ -215,23 +215,24 @@ with tabs[0]:
         # Display nicely formatted balances
         balance_data = []
         for uid, data in balances.items():
-            b = data["net_balance"]
-            status = "Settled Up"
-            color = "gray"
-            if b > 0:
-                status = f"Gets back ${b:.2f}"
-                color = "green"
-            elif b < 0:
-                status = f"Owes ${-b:.2f}"
-                color = "red"
+            if data['name'] != 'Admin':
+                b = data["net_balance"]
+                status = "Settled Up"
+                color = "gray"
+                if b > 0:
+                    status = f"Gets back ${b:.2f}"
+                    color = "green"
+                elif b < 0:
+                    status = f"Owes ${-b:.2f}"
+                    color = "red"
+                    
+                balance_data.append({
+                    "Person": data["name"],
+                    "Balance": status,
+                    "_raw_balance": b
+                })
                 
-            balance_data.append({
-                "Person": data["name"],
-                "Balance": status,
-                "_raw_balance": b
-            })
-            
-            st.markdown(f"**{data['name']}**: :{color}[{status}]")
+                st.markdown(f"**{data['name']}**: :{color}[{status}]")
             
         st.divider()
         st.subheader("Suggested Payments to Settle All Debts")
