@@ -129,62 +129,77 @@ with tabs[1]:
     if not users:
         st.warning("Please add people to the group first.")
     else:
-        with st.form("add_expense_form", clear_on_submit=True):
-            description = st.text_input("Description (e.g., Groceries, Ski Passes)")
-            amount = st.number_input("Amount ($)", min_value=0.01, step=0.01, format="%.2f")
-            
-            payer_id = st.selectbox(
-                "Who paid?", 
-                options=[u["id"] for u in users], 
-                format_func=lambda x: user_map[x],
-                index=[u["id"] for u in users].index(st.session_state.current_user['id']) if st.session_state.current_user['id'] in [u["id"] for u in users] else 0
-            )
-            
-            split_with = st.multiselect(
-                "Split among:", 
-                options=[u["id"] for u in users],
-                default=[u["id"] for u in users],
-                format_func=lambda x: user_map[x]
-            )
-            
-            is_custom_split = st.checkbox("Split unequally", value=False)
-            
-            custom_amounts = {}
-            if is_custom_split and split_with:
-                st.write("Enter amounts for each person (must sum to total):")
-                for uid in split_with:
-                    custom_amounts[uid] = st.number_input(f"Amount for {user_map[uid]}", min_value=0.0, step=0.01, format="%.2f", key=f"split_add_{uid}")
-            
-            submit_expense = st.form_submit_button("Save Expense")
-            
-            if submit_expense:
-                if not description.strip():
-                    st.error("Please provide a description.")
-                elif not split_with:
-                    st.error("You must select at least one person to split the expense with.")
-                else:
-                    splits = []
-                    valid = True
-                    if is_custom_split:
-                        total_custom = sum(custom_amounts.values())
-                        if abs(total_custom - amount) > 0.01:
-                            st.error(f"Custom amounts sum to ${total_custom:.2f}, but the total is ${amount:.2f}. Please adjust.")
-                            valid = False
-                        else:
-                            for uid in split_with:
-                                splits.append({"user_id": uid, "amount_owed": custom_amounts[uid]})
+        container = st.container()
+        
+        description = container.text_input("Description (e.g., Groceries, Ski Passes)", key="add_desc")
+        amount = container.number_input("Amount ($)", min_value=0.01, step=0.01, format="%.2f", key="add_amount")
+        
+        payer_id = container.selectbox(
+            "Who paid?", 
+            options=[u["id"] for u in users], 
+            format_func=lambda x: user_map[x],
+            index=[u["id"] for u in users].index(st.session_state.current_user['id']) if st.session_state.current_user['id'] in [u["id"] for u in users] else 0,
+            key="add_payer"
+        )
+        
+        split_with = container.multiselect(
+            "Split among:", 
+            options=[u["id"] for u in users],
+            default=[u["id"] for u in users],
+            format_func=lambda x: user_map[x],
+            key="add_split_with"
+        )
+        
+        is_custom_split = container.checkbox("Split unequally", value=False, key="add_is_custom")
+        
+        custom_amounts = {}
+        if is_custom_split and split_with:
+            container.write("Enter amounts for each person (must sum to total):")
+            equal_amount = amount / len(split_with) if len(split_with) > 0 else 0
+            for uid in split_with:
+                custom_amounts[uid] = container.number_input(
+                    f"Amount for {user_map[uid]}", 
+                    min_value=0.0, step=0.01, format="%.2f", 
+                    value=float(equal_amount), 
+                    key=f"split_add_{uid}"
+                )
+        
+        submit_expense = container.button("Save Expense", type="primary", key="add_submit_btn")
+        
+        if submit_expense:
+            if not description.strip():
+                st.error("Please provide a description.")
+            elif not split_with:
+                st.error("You must select at least one person to split the expense with.")
+            else:
+                splits = []
+                valid = True
+                if is_custom_split:
+                    total_custom = sum(custom_amounts.values())
+                    if abs(total_custom - amount) > 0.01:
+                        st.error(f"Custom amounts sum to ${total_custom:.2f}, but the total is ${amount:.2f}. Please adjust.")
+                        valid = False
                     else:
-                        split_amt = amount / len(split_with)
                         for uid in split_with:
-                            splits.append({"user_id": uid, "amount_owed": split_amt})
-                    
-                    if valid:
-                        success = add_expense(description.strip(), amount, payer_id, splits)
-                        if success:
-                            st.success(f"Added expense: {description}")
-                            st.rerun()
-                        else:
-                            st.error("Failed to add expense.")
+                            splits.append({"user_id": uid, "amount_owed": custom_amounts[uid]})
+                else:
+                    split_amt = amount / len(split_with)
+                    for uid in split_with:
+                        splits.append({"user_id": uid, "amount_owed": split_amt})
+                
+                if valid:
+                    success = add_expense(description.strip(), amount, payer_id, splits)
+                    if success:
+                        st.success(f"Added expense: {description}")
+                        # clear state
+                        for key in ["add_desc", "add_amount", "add_payer", "add_split_with", "add_is_custom"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                        for uid in [u["id"] for u in users]:
+                            k = f"split_add_{uid}"
+                            if k in st.session_state:
+                                del st.session_state[k]
+                        st.rerun()
 
 # --- Settle Up Tab ---
 with tabs[2]:
@@ -305,6 +320,16 @@ with tabs[4]:
                     with col1:
                         if st.button("Edit Expense", key=f"edit_btn_{e['id']}"):
                             st.session_state.editing_expense_id = e['id']
+                            
+                            is_custom = False
+                            if e['splits']:
+                                eq_amt = e['amount'] / len(e['splits'])
+                                for s in e['splits']:
+                                    if abs(s['amount_owed'] - eq_amt) > 0.02:
+                                        is_custom = True
+                                        break
+                            st.session_state[f"custom_edit_{e['id']}"] = is_custom
+                            
                             st.rerun()
                     with col2:
                         if st.button("Delete Expense", key=f"del_btn_{e['id']}"):
@@ -315,62 +340,70 @@ with tabs[4]:
                     if st.session_state.get("editing_expense_id") == e['id']:
                         st.write("---")
                         st.write("Edit Expense")
-                        with st.form(f"edit_form_{e['id']}"):
-                            new_desc = st.text_input("Description", value=e['description'])
-                            new_amount = st.number_input("Amount ($)", value=float(e['amount']), min_value=0.01, step=0.01)
-                            new_splits = st.multiselect(
-                                "Split among:", 
-                                options=[u["id"] for u in users],
-                                default=[s["id"] for s in e['splits']],
-                                format_func=lambda x: user_map[x]
-                            )
+                        edit_container = st.container()
+                        
+                        new_desc = edit_container.text_input("Description", value=e['description'], key=f"edit_desc_{e['id']}")
+                        new_amount = edit_container.number_input("Amount ($)", value=float(e['amount']), min_value=0.01, step=0.01, key=f"edit_amt_{e['id']}")
+                        new_splits = edit_container.multiselect(
+                            "Split among:", 
+                            options=[u["id"] for u in users],
+                            default=[s["id"] for s in e['splits']],
+                            format_func=lambda x: user_map[x],
+                            key=f"edit_splits_{e['id']}"
+                        )
+                        
+                        is_custom_split_edit = edit_container.checkbox("Split unequally", key=f"custom_edit_{e['id']}")
+                        custom_amounts_edit = {}
+                        if is_custom_split_edit and new_splits:
+                            edit_container.write("Enter amounts for each person:")
+                            equal_amount = new_amount / len(new_splits) if len(new_splits) > 0 else 0
                             
-                            is_custom_split_edit = st.checkbox("Split unequally", value=False, key=f"custom_edit_{e['id']}")
-                            custom_amounts_edit = {}
-                            if is_custom_split_edit and new_splits:
-                                st.write("Enter amounts for each person:")
-                                for s in e['splits']:
-                                    if s["id"] in new_splits:
-                                        custom_amounts_edit[s["id"]] = st.number_input(f"Amount for {s['name']}", min_value=0.0, step=0.01, format="%.2f", value=float(s["amount_owed"]), key=f"split_edit_{e['id']}_{s['id']}")
-                                for uid in new_splits:
-                                    if uid not in custom_amounts_edit:
-                                        custom_amounts_edit[uid] = st.number_input(f"Amount for {user_map[uid]}", min_value=0.0, step=0.01, format="%.2f", value=0.0, key=f"split_edit_{e['id']}_{uid}")
+                            stored_splits = {s["id"]: s["amount_owed"] for s in e['splits']}
+                            
+                            for uid in new_splits:
+                                def_val = stored_splits.get(uid, equal_amount)
+                                custom_amounts_edit[uid] = edit_container.number_input(
+                                    f"Amount for {user_map[uid]}", 
+                                    min_value=0.0, step=0.01, format="%.2f", 
+                                    value=float(def_val), 
+                                    key=f"split_edit_val_{e['id']}_{uid}"
+                                )
 
-                            col_sub1, col_sub2 = st.columns(2)
-                            with col_sub1:
-                                save_edit = st.form_submit_button("Save Changes")
-                            with col_sub2:
-                                cancel_edit = st.form_submit_button("Cancel")
-                                
-                            if save_edit:
-                                if not new_desc.strip():
-                                    st.error("Description required.")
-                                elif not new_splits:
-                                    st.error("Select at least one person.")
-                                else:
-                                    splits_to_save = []
-                                    valid_edit = True
-                                    if is_custom_split_edit:
-                                        total_custom_edit = sum(custom_amounts_edit.values())
-                                        if abs(total_custom_edit - new_amount) > 0.01:
-                                            st.error(f"Custom amounts sum to ${total_custom_edit:.2f}, but the total is ${new_amount:.2f}. Please adjust.")
-                                            valid_edit = False
-                                        else:
-                                            for uid in new_splits:
-                                                splits_to_save.append({"user_id": uid, "amount_owed": custom_amounts_edit[uid]})
+                        col_sub1, col_sub2 = edit_container.columns(2)
+                        with col_sub1:
+                            save_edit = st.button("Save Changes", type="primary", key=f"save_edit_btn_{e['id']}")
+                        with col_sub2:
+                            cancel_edit = st.button("Cancel", key=f"cancel_edit_btn_{e['id']}")
+                            
+                        if save_edit:
+                            if not new_desc.strip():
+                                st.error("Description required.")
+                            elif not new_splits:
+                                st.error("Select at least one person.")
+                            else:
+                                splits_to_save = []
+                                valid_edit = True
+                                if is_custom_split_edit:
+                                    total_custom_edit = sum(custom_amounts_edit.values())
+                                    if abs(total_custom_edit - new_amount) > 0.01:
+                                        st.error(f"Custom amounts sum to ${total_custom_edit:.2f}, but the total is ${new_amount:.2f}. Please adjust.")
+                                        valid_edit = False
                                     else:
-                                        split_amt = new_amount / len(new_splits)
                                         for uid in new_splits:
-                                            splits_to_save.append({"user_id": uid, "amount_owed": split_amt})
+                                            splits_to_save.append({"user_id": uid, "amount_owed": custom_amounts_edit[uid]})
+                                else:
+                                    split_amt = new_amount / len(new_splits)
+                                    for uid in new_splits:
+                                        splits_to_save.append({"user_id": uid, "amount_owed": split_amt})
 
-                                    if valid_edit:
-                                        update_expense(e['id'], new_desc.strip(), new_amount, e['payer_id'], splits_to_save)
-                                        st.session_state.editing_expense_id = None
-                                        st.success("Updated!")
-                                        st.rerun()
-                            if cancel_edit:
-                                st.session_state.editing_expense_id = None
-                                st.rerun()
+                                if valid_edit:
+                                    update_expense(e['id'], new_desc.strip(), new_amount, e['payer_id'], splits_to_save)
+                                    st.session_state.editing_expense_id = None
+                                    st.success("Updated!")
+                                    st.rerun()
+                        if cancel_edit:
+                            st.session_state.editing_expense_id = None
+                            st.rerun()
     else:
         st.write("No expenses recorded yet.")
         
