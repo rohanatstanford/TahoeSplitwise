@@ -83,7 +83,7 @@ def get_user_map():
     users = get_users()
     return {u["id"]: u["name"] for u in users}
 
-def add_expense(description, amount, payer_id, split_user_ids):
+def add_expense(description, amount, payer_id, splits):
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -94,15 +94,12 @@ def add_expense(description, amount, payer_id, split_user_ids):
         ''', (description, amount, payer_id))
         expense_id = c.lastrowid
         
-        # Calculate split amount
-        split_amount = amount / len(split_user_ids)
-        
         # Insert splits
-        for user_id in split_user_ids:
+        for split in splits:
             c.execute('''
                 INSERT INTO expense_splits (expense_id, user_id, amount_owed)
                 VALUES (?, ?, ?)
-            ''', (expense_id, user_id, split_amount))
+            ''', (expense_id, split["user_id"], split["amount_owed"]))
             
         conn.commit()
         return True
@@ -179,7 +176,7 @@ def get_settlements():
     conn.close()
     return [{"id": row[0], "payer_name": row[1], "payee_name": row[2], "amount": row[3], "date": row[4]} for row in settlements]
 
-def update_expense(expense_id, description, amount, payer_id, split_user_ids):
+def update_expense(expense_id, description, amount, payer_id, splits):
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -191,12 +188,11 @@ def update_expense(expense_id, description, amount, payer_id, split_user_ids):
         
         c.execute('DELETE FROM expense_splits WHERE expense_id = ?', (expense_id,))
         
-        split_amount = amount / len(split_user_ids)
-        for user_id in split_user_ids:
+        for split in splits:
             c.execute('''
                 INSERT INTO expense_splits (expense_id, user_id, amount_owed)
                 VALUES (?, ?, ?)
-            ''', (expense_id, user_id, split_amount))
+            ''', (expense_id, split["user_id"], split["amount_owed"]))
             
         conn.commit()
         return True

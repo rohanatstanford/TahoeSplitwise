@@ -141,11 +141,19 @@ with tabs[1]:
             )
             
             split_with = st.multiselect(
-                "Split equally among:", 
+                "Split among:", 
                 options=[u["id"] for u in users],
                 default=[u["id"] for u in users],
                 format_func=lambda x: user_map[x]
             )
+            
+            is_custom_split = st.checkbox("Split unequally", value=False)
+            
+            custom_amounts = {}
+            if is_custom_split and split_with:
+                st.write("Enter amounts for each person (must sum to total):")
+                for uid in split_with:
+                    custom_amounts[uid] = st.number_input(f"Amount for {user_map[uid]}", min_value=0.0, step=0.01, format="%.2f", key=f"split_add_{uid}")
             
             submit_expense = st.form_submit_button("Save Expense")
             
@@ -155,12 +163,28 @@ with tabs[1]:
                 elif not split_with:
                     st.error("You must select at least one person to split the expense with.")
                 else:
-                    success = add_expense(description.strip(), amount, payer_id, split_with)
-                    if success:
-                        st.success(f"Added expense: {description}")
-                        st.rerun()
+                    splits = []
+                    valid = True
+                    if is_custom_split:
+                        total_custom = sum(custom_amounts.values())
+                        if abs(total_custom - amount) > 0.01:
+                            st.error(f"Custom amounts sum to ${total_custom:.2f}, but the total is ${amount:.2f}. Please adjust.")
+                            valid = False
+                        else:
+                            for uid in split_with:
+                                splits.append({"user_id": uid, "amount_owed": custom_amounts[uid]})
                     else:
-                        st.error("Failed to add expense.")
+                        split_amt = amount / len(split_with)
+                        for uid in split_with:
+                            splits.append({"user_id": uid, "amount_owed": split_amt})
+                    
+                    if valid:
+                        success = add_expense(description.strip(), amount, payer_id, splits)
+                        if success:
+                            st.success(f"Added expense: {description}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to add expense.")
 
 # --- Settle Up Tab ---
 with tabs[2]:
@@ -295,12 +319,23 @@ with tabs[4]:
                             new_desc = st.text_input("Description", value=e['description'])
                             new_amount = st.number_input("Amount ($)", value=float(e['amount']), min_value=0.01, step=0.01)
                             new_splits = st.multiselect(
-                                "Split equally among:", 
+                                "Split among:", 
                                 options=[u["id"] for u in users],
                                 default=[s["id"] for s in e['splits']],
                                 format_func=lambda x: user_map[x]
                             )
                             
+                            is_custom_split_edit = st.checkbox("Split unequally", value=False, key=f"custom_edit_{e['id']}")
+                            custom_amounts_edit = {}
+                            if is_custom_split_edit and new_splits:
+                                st.write("Enter amounts for each person:")
+                                for s in e['splits']:
+                                    if s["id"] in new_splits:
+                                        custom_amounts_edit[s["id"]] = st.number_input(f"Amount for {s['name']}", min_value=0.0, step=0.01, format="%.2f", value=float(s["amount_owed"]), key=f"split_edit_{e['id']}_{s['id']}")
+                                for uid in new_splits:
+                                    if uid not in custom_amounts_edit:
+                                        custom_amounts_edit[uid] = st.number_input(f"Amount for {user_map[uid]}", min_value=0.0, step=0.01, format="%.2f", value=0.0, key=f"split_edit_{e['id']}_{uid}")
+
                             col_sub1, col_sub2 = st.columns(2)
                             with col_sub1:
                                 save_edit = st.form_submit_button("Save Changes")
@@ -313,10 +348,26 @@ with tabs[4]:
                                 elif not new_splits:
                                     st.error("Select at least one person.")
                                 else:
-                                    update_expense(e['id'], new_desc.strip(), new_amount, e['payer_id'], new_splits)
-                                    st.session_state.editing_expense_id = None
-                                    st.success("Updated!")
-                                    st.rerun()
+                                    splits_to_save = []
+                                    valid_edit = True
+                                    if is_custom_split_edit:
+                                        total_custom_edit = sum(custom_amounts_edit.values())
+                                        if abs(total_custom_edit - new_amount) > 0.01:
+                                            st.error(f"Custom amounts sum to ${total_custom_edit:.2f}, but the total is ${new_amount:.2f}. Please adjust.")
+                                            valid_edit = False
+                                        else:
+                                            for uid in new_splits:
+                                                splits_to_save.append({"user_id": uid, "amount_owed": custom_amounts_edit[uid]})
+                                    else:
+                                        split_amt = new_amount / len(new_splits)
+                                        for uid in new_splits:
+                                            splits_to_save.append({"user_id": uid, "amount_owed": split_amt})
+
+                                    if valid_edit:
+                                        update_expense(e['id'], new_desc.strip(), new_amount, e['payer_id'], splits_to_save)
+                                        st.session_state.editing_expense_id = None
+                                        st.success("Updated!")
+                                        st.rerun()
                             if cancel_edit:
                                 st.session_state.editing_expense_id = None
                                 st.rerun()
