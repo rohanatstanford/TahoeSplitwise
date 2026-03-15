@@ -4,10 +4,14 @@ import io
 from db import init_db, add_user, get_users, get_user_map, add_expense, get_expenses, add_settlement, get_settlements, update_expense, delete_expense, clear_all_expenses, clear_all_users, delete_user
 from logic import calculate_balances, simplify_debts, calculate_pairwise_balances
 
-# Initialize database
-init_db()
-
 st.set_page_config(page_title="Tahoe Splitwise", layout="wide")
+
+# Initialize database
+@st.cache_resource
+def setup_database():
+    init_db()
+
+setup_database()
 
 st.title("🏔️ Tahoe Splitwise")
 # st.markdown("Split expenses and settle debts for your Tahoe trip.")

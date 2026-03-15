@@ -1,71 +1,61 @@
-from db import get_connection
+from db import get_users, get_expenses, get_settlements
 
 def calculate_balances():
-    """
-    Returns a dictionary of net balances for each user.
-    Positive means they are owed money.
-    Negative means they owe money.
-    """
-    conn = get_connection()
-    c = conn.cursor()
+    users = get_users()
+    balances = {u["id"]: {"name": u["name"], "net_balance": 0.0} for u in users}
     
-    # Initialize balances
-    c.execute('SELECT id, name FROM users')
-    users = c.fetchall()
-    balances = {u[0]: {"name": u[1], "net_balance": 0.0} for u in users}
-    
-    # Tally up expenses
-    c.execute('''
-        SELECT e.payer_id, es.user_id, es.amount_owed
-        FROM expenses e
-        JOIN expense_splits es ON e.id = es.expense_id
-    ''')
-    expense_details = c.fetchall()
-    
-    for payer_id, split_user_id, amount_owed in expense_details:
-        if payer_id != split_user_id:
-            # Payer is owed money
-            balances[payer_id]["net_balance"] += amount_owed
-            # Split user owes money
-            balances[split_user_id]["net_balance"] -= amount_owed
+    expenses = get_expenses()
+    for e in expenses:
+        payer_id = e["payer_id"]
+        if payer_id not in balances:
+            balances[payer_id] = {"name": e["payer_name"], "net_balance": 0.0}
             
-    # Tally up settlements
-    c.execute('SELECT payer_id, payee_id, amount FROM settlements')
-    settlements = c.fetchall()
-    
-    for payer_id, payee_id, amount in settlements:
-        # Payer reduces their debt (equivalent to increasing net balance)
+        for split in e["splits"]:
+            split_user_id = split["id"]
+            amount_owed = split["amount_owed"]
+            
+            if split_user_id not in balances:
+                balances[split_user_id] = {"name": split["name"], "net_balance": 0.0}
+                
+            if payer_id != split_user_id:
+                balances[payer_id]["net_balance"] += amount_owed
+                balances[split_user_id]["net_balance"] -= amount_owed
+                
+    settlements = get_settlements()
+    for s in settlements:
+        payer_id = s["payer_id"]
+        payee_id = s["payee_id"]
+        amount = s["amount"]
+        
+        if payer_id not in balances:
+            balances[payer_id] = {"name": s["payer_name"], "net_balance": 0.0}
+        if payee_id not in balances:
+            balances[payee_id] = {"name": s["payee_name"], "net_balance": 0.0}
+            
         balances[payer_id]["net_balance"] += amount
-        # Payee reduces amounts owed to them
         balances[payee_id]["net_balance"] -= amount
         
-    conn.close()
     return balances
 
 def simplify_debts(balances):
-    """
-    Takes the balance dictionary and returns a list of suggested transactions 
-    to simplify debts.
-    Returns: list of dicts {"from": user_id, "to": user_id, "amount": amount}
-    """
     debtors = []
     creditors = []
     
     for user_id, data in balances.items():
+        if data["name"] == "Admin": continue
         balance_amount = round(data["net_balance"], 2)
         if balance_amount < 0:
             debtors.append({"id": user_id, "name": data["name"], "amount": -balance_amount})
         elif balance_amount > 0:
             creditors.append({"id": user_id, "name": data["name"], "amount": balance_amount})
             
-    # Sort them by amount descending
     debtors.sort(key=lambda x: x["amount"], reverse=True)
     creditors.sort(key=lambda x: x["amount"], reverse=True)
     
     transactions = []
     
-    i = 0 # debtors index
-    j = 0 # creditors index
+    i = 0
+    j = 0
     
     while i < len(debtors) and j < len(creditors):
         debtor = debtors[i]
@@ -85,7 +75,6 @@ def simplify_debts(balances):
         debtor["amount"] -= amount
         creditor["amount"] -= amount
         
-        # Avoid floating point issues
         debtor["amount"] = round(debtor["amount"], 2)
         creditor["amount"] = round(creditor["amount"], 2)
         
@@ -97,41 +86,53 @@ def simplify_debts(balances):
     return transactions
 
 def calculate_pairwise_balances():
-    """
-    Returns a 2D dictionary mapping user_id -> {other_user_id: net_amount_owed_to_user_id}.
-    If matrix[A][B] = 50, it means B owes A $50.
-    """
-    conn = get_connection()
-    c = conn.cursor()
+    users = get_users()
+    user_ids = [u["id"] for u in users]
+    matrix = {u: {other: 0.0 for other in user_ids} for u in user_ids}
     
-    c.execute('SELECT id FROM users')
-    users = [row[0] for row in c.fetchall()]
-    
-    # Initialize matrix
-    matrix = {u: {other: 0.0 for other in users} for u in users}
-    
-    c.execute('''
-        SELECT e.payer_id, es.user_id, es.amount_owed
-        FROM expenses e
-        JOIN expense_splits es ON e.id = es.expense_id
-    ''')
-    expense_details = c.fetchall()
-    
-    for payer_id, split_user_id, amount_owed in expense_details:
-        if payer_id != split_user_id:
-            matrix[payer_id][split_user_id] += amount_owed
+    expenses = get_expenses()
+    for e in expenses:
+        payer_id = e["payer_id"]
+        if payer_id not in matrix:
+            user_ids.append(payer_id)
+            matrix[payer_id] = {other: 0.0 for other in user_ids}
+            for u in user_ids:
+                if payer_id not in matrix[u]:
+                    matrix[u][payer_id] = 0.0
+
+        for split in e["splits"]:
+            split_user_id = split["id"]
+            amount_owed = split["amount_owed"]
             
-    c.execute('SELECT payer_id, payee_id, amount FROM settlements')
-    settlements = c.fetchall()
-    
-    for payer_id, payee_id, amount in settlements:
+            if split_user_id not in matrix:
+                user_ids.append(split_user_id)
+                matrix[split_user_id] = {other: 0.0 for other in user_ids}
+                for u in user_ids:
+                    if split_user_id not in matrix[u]:
+                        matrix[u][split_user_id] = 0.0
+                        
+            if payer_id != split_user_id:
+                matrix[payer_id][split_user_id] += amount_owed
+
+    settlements = get_settlements()
+    for s in settlements:
+        payer_id = s["payer_id"]
+        payee_id = s["payee_id"]
+        amount = s["amount"]
+        
+        for u in [payer_id, payee_id]:
+            if u not in matrix:
+                user_ids.append(u)
+                matrix[u] = {other: 0.0 for other in user_ids}
+                for uid in user_ids:
+                    if u not in matrix[uid]:
+                        matrix[uid][u] = 0.0
+                        
         matrix[payee_id][payer_id] -= amount
         
-    conn.close()
-    
-    net_matrix = {u: {other: 0.0 for other in users} for u in users}
-    for u1 in users:
-        for u2 in users:
+    net_matrix = {u: {other: 0.0 for other in user_ids} for u in user_ids}
+    for u1 in user_ids:
+        for u2 in user_ids:
             if u1 != u2:
                 net_owed = matrix[u1][u2] - matrix[u2][u1]
                 if net_owed > 0:

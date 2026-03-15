@@ -1,270 +1,341 @@
-import sqlite3
+import gspread
+from google.oauth2.service_account import Credentials
 import os
+import time
+from datetime import datetime
+import streamlit as st
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'tahoe_costing.db')
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
 
-def get_connection():
-    return sqlite3.connect(DB_PATH)
+CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), 'credentials.json')
+SHEET_ID = '154n7Afm0qQEuvkn_5dt7lYhDsSrBdZYu4WnsV6oFRPY'
+
+_client = None
+_sheet = None
+_worksheets = {}
+
+def get_client():
+    global _client
+    if _client is None:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+        _client = gspread.authorize(creds)
+    return _client
+
+def get_sheet():
+    global _sheet
+    if _sheet is None:
+        _sheet = get_client().open_by_key(SHEET_ID)
+    return _sheet
+
+def get_worksheet(name, headers=None):
+    global _worksheets
+    if name in _worksheets:
+        return _worksheets[name]
+    sheet = get_sheet()
+    try:
+        ws = sheet.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sheet.add_worksheet(title=name, rows="1000", cols="20")
+        if headers:
+            ws.append_row(headers)
+    _worksheets[name] = ws
+    return ws
 
 def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-    
-    # Users table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE
-        )
-    ''')
-    
-    # Expenses table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            description TEXT NOT NULL,
-            amount REAL NOT NULL,
-            payer_id INTEGER NOT NULL,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (payer_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Expense splits table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS expense_splits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            expense_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            amount_owed REAL NOT NULL,
-            FOREIGN KEY (expense_id) REFERENCES expenses (id),
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Settlements table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS settlements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            payer_id INTEGER NOT NULL,
-            payee_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (payer_id) REFERENCES users (id),
-            FOREIGN KEY (payee_id) REFERENCES users (id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    get_worksheet('users', ['id', 'name'])
+    get_worksheet('expenses', ['id', 'description', 'amount', 'payer_id', 'date'])
+    get_worksheet('expense_splits', ['id', 'expense_id', 'user_id', 'amount_owed'])
+    get_worksheet('settlements', ['id', 'payer_id', 'payee_id', 'amount', 'date'])
 
-# Helper functions for db operations
+def generate_id():
+    return int(time.time() * 1000000 % 2147483647)
+
 def add_user(name):
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute('INSERT INTO users (name) VALUES (?)', (name,))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
+    ws = get_worksheet('users')
+    records = ws.get_all_records()
+    if any(str(r.get('name', '')).lower() == name.lower() for r in records):
         return False
-    finally:
-        conn.close()
+    new_id = generate_id()
+    ws.append_row([str(new_id), name])
+    st.cache_data.clear()
+    return True
 
+@st.cache_data(ttl=10)
 def get_users():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('SELECT id, name FROM users ORDER BY name')
-    users = c.fetchall()
-    conn.close()
-    return [{"id": row[0], "name": row[1]} for row in users if row[1].lower() != 'admin']
+    ws = get_worksheet('users')
+    records = ws.get_all_records()
+    users = [{"id": int(r['id']), "name": str(r['name'])} for r in records if r.get('id') and str(r.get('name', '')).lower() != 'admin']
+    return sorted(users, key=lambda x: x['name'])
 
+@st.cache_data(ttl=10)
 def get_user_map():
     users = get_users()
-    return {u["id"]: u["name"] for u in users}
+    m = {}
+    for u in users:
+        m[u["id"]] = u["name"]
+    return m
 
 def add_expense(description, amount, payer_id, splits):
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        # Insert expense
-        c.execute('''
-            INSERT INTO expenses (description, amount, payer_id)
-            VALUES (?, ?, ?)
-        ''', (description, amount, payer_id))
-        expense_id = c.lastrowid
+        exp_ws = get_worksheet('expenses')
+        splits_ws = get_worksheet('expense_splits')
         
-        # Insert splits
+        expense_id = generate_id()
+        date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        exp_ws.append_row([str(expense_id), description, str(amount), str(payer_id), date_str])
+        
+        rows_to_insert = []
         for split in splits:
-            c.execute('''
-                INSERT INTO expense_splits (expense_id, user_id, amount_owed)
-                VALUES (?, ?, ?)
-            ''', (expense_id, split["user_id"], split["amount_owed"]))
+            split_id = generate_id()
+            rows_to_insert.append([str(split_id), str(expense_id), str(split["user_id"]), str(split["amount_owed"])])
+            time.sleep(0.01)
+        
+        if rows_to_insert:
+            splits_ws.append_rows(rows_to_insert)
             
-        conn.commit()
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"Error adding expense: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
 
+@st.cache_data(ttl=10)
 def get_expenses():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT e.id, e.description, e.amount, u.name as payer_name, e.date, e.payer_id
-        FROM expenses e
-        JOIN users u ON e.payer_id = u.id
-        ORDER BY e.date DESC
-    ''')
-    expenses = c.fetchall()
+    exp_ws = get_worksheet('expenses')
+    splits_ws = get_worksheet('expense_splits')
+    
+    users_records = get_worksheet('users').get_all_records()
+    all_users_map = {int(u['id']): str(u['name']) for u in users_records if u.get('id')}
+    
+    expenses_data = exp_ws.get_all_records()
+    splits_data = splits_ws.get_all_records()
+    
+    expenses_data.sort(key=lambda x: str(x.get('date', '')), reverse=True)
     
     result = []
-    for row in expenses:
-        expense_id = row[0]
-        c.execute('''
-            SELECT u.id, u.name, es.amount_owed 
-            FROM expense_splits es
-            JOIN users u ON es.user_id = u.id
-            WHERE es.expense_id = ?
-        ''', (expense_id,))
-        splits = c.fetchall()
+    for row in expenses_data:
+        if not row.get('id'): continue
+        expense_id = int(row['id'])
+        payer_id = int(row['payer_id'])
+        payer_name = all_users_map.get(payer_id, "Unknown")
         
+        expense_splits = [s for s in splits_data if s.get('expense_id') and int(s['expense_id']) == expense_id]
+        
+        formatted_splits = []
+        for s in expense_splits:
+            uid = int(s['user_id'])
+            uname = all_users_map.get(uid, "Unknown")
+            formatted_splits.append({
+                "id": uid,
+                "name": uname,
+                "amount_owed": float(s['amount_owed'])
+            })
+            
         result.append({
-            "id": row[0],
-            "description": row[1],
-            "amount": row[2],
-            "payer_name": row[3],
-            "date": row[4],
-            "payer_id": row[5],
-            "splits": [{"id": s[0], "name": s[1], "amount_owed": s[2]} for s in splits]
+            "id": expense_id,
+            "description": str(row['description']),
+            "amount": float(row['amount']),
+            "payer_name": payer_name,
+            "date": str(row['date']),
+            "payer_id": payer_id,
+            "splits": formatted_splits
         })
         
-    conn.close()
     return result
 
 def add_settlement(payer_id, payee_id, amount):
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('''
-            INSERT INTO settlements (payer_id, payee_id, amount)
-            VALUES (?, ?, ?)
-        ''', (payer_id, payee_id, amount))
-        conn.commit()
+        ws = get_worksheet('settlements')
+        settlement_id = generate_id()
+        date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([str(settlement_id), str(payer_id), str(payee_id), str(amount), date_str])
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"Error adding settlement: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
 
+@st.cache_data(ttl=10)
 def get_settlements():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT s.id, payer.name, payee.name, s.amount, s.date
-        FROM settlements s
-        JOIN users payer ON s.payer_id = payer.id
-        JOIN users payee ON s.payee_id = payee.id
-        ORDER BY s.date DESC
-    ''')
-    settlements = c.fetchall()
-    conn.close()
-    return [{"id": row[0], "payer_name": row[1], "payee_name": row[2], "amount": row[3], "date": row[4]} for row in settlements]
+    ws = get_worksheet('settlements')
+    users_records = get_worksheet('users').get_all_records()
+    all_users_map = {int(u['id']): str(u['name']) for u in users_records if u.get('id')}
+    
+    settlements = ws.get_all_records()
+    settlements.sort(key=lambda x: str(x.get('date', '')), reverse=True)
+    
+    result = []
+    for row in settlements:
+        if not row.get('id'): continue
+        payer_id = int(row['payer_id'])
+        payee_id = int(row['payee_id'])
+        result.append({
+            "id": int(row['id']),
+            "payer_id": payer_id,
+            "payee_id": payee_id,
+            "payer_name": all_users_map.get(payer_id, "Unknown"),
+            "payee_name": all_users_map.get(payee_id, "Unknown"),
+            "amount": float(row['amount']),
+            "date": str(row['date'])
+        })
+    return result
 
 def update_expense(expense_id, description, amount, payer_id, splits):
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('''
-            UPDATE expenses 
-            SET description = ?, amount = ?, payer_id = ?
-            WHERE id = ?
-        ''', (description, amount, payer_id, expense_id))
+        exp_ws = get_worksheet('expenses')
+        splits_ws = get_worksheet('expense_splits')
         
-        c.execute('DELETE FROM expense_splits WHERE expense_id = ?', (expense_id,))
-        
-        for split in splits:
-            c.execute('''
-                INSERT INTO expense_splits (expense_id, user_id, amount_owed)
-                VALUES (?, ?, ?)
-            ''', (expense_id, split["user_id"], split["amount_owed"]))
+        exp_records = exp_ws.get_all_records()
+        row_idx = None
+        for i, r in enumerate(exp_records):
+            if r.get('id') and int(r['id']) == int(expense_id):
+                row_idx = i + 2
+                break
+                
+        if row_idx is not None:
+            exp_ws.update(range_name=f"B{row_idx}:D{row_idx}", values=[[description, str(amount), str(payer_id)]])
             
-        conn.commit()
-        return True
+            all_splits = splits_ws.get_all_values()
+            rows_to_delete = []
+            for i, row in enumerate(all_splits):
+                if i == 0: continue
+                if row[1] and str(row[1]).isdigit() and int(row[1]) == int(expense_id):
+                    rows_to_delete.append(i + 1)
+            
+            for r_idx in sorted(rows_to_delete, reverse=True):
+                splits_ws.delete_rows(r_idx)
+                
+            rows_to_insert = []
+            for split in splits:
+                split_id = generate_id()
+                rows_to_insert.append([str(split_id), str(expense_id), str(split["user_id"]), str(split["amount_owed"])])
+                time.sleep(0.01)
+                
+            if rows_to_insert:
+                splits_ws.append_rows(rows_to_insert)
+                
+            st.cache_data.clear()
+            return True
+        return False
     except Exception as e:
         print(f"Error updating expense: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
 
 def delete_expense(expense_id):
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('DELETE FROM expense_splits WHERE expense_id = ?', (expense_id,))
-        c.execute('DELETE FROM expenses WHERE id = ?', (expense_id,))
-        conn.commit()
+        exp_ws = get_worksheet('expenses')
+        splits_ws = get_worksheet('expense_splits')
+        
+        all_splits = splits_ws.get_all_values()
+        rows_to_delete = []
+        for i, row in enumerate(all_splits):
+            if i == 0: continue
+            if row[1] and str(row[1]).isdigit() and int(row[1]) == int(expense_id):
+                rows_to_delete.append(i + 1)
+        for r_idx in sorted(rows_to_delete, reverse=True):
+            splits_ws.delete_rows(r_idx)
+            
+        all_exps = exp_ws.get_all_values()
+        exp_row_to_delete = None
+        for i, row in enumerate(all_exps):
+            if i == 0: continue
+            if row[0] and str(row[0]).isdigit() and int(row[0]) == int(expense_id):
+                exp_row_to_delete = i + 1
+                break
+        
+        if exp_row_to_delete:
+            exp_ws.delete_rows(exp_row_to_delete)
+            
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"Error deleting expense: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
 
 def clear_all_expenses():
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('DELETE FROM expense_splits')
-        c.execute('DELETE FROM expenses')
-        c.execute('DELETE FROM settlements')
-        conn.commit()
+        def reset_sheet(name, headers):
+            ws = get_worksheet(name)
+            ws.clear()
+            ws.append_row(headers)
+            
+        reset_sheet('expense_splits', ['id', 'expense_id', 'user_id', 'amount_owed'])
+        reset_sheet('expenses', ['id', 'description', 'amount', 'payer_id', 'date'])
+        reset_sheet('settlements', ['id', 'payer_id', 'payee_id', 'amount', 'date'])
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"Error clearing expenses: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
 
 def clear_all_users():
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('DELETE FROM expense_splits')
-        c.execute('DELETE FROM expenses')
-        c.execute('DELETE FROM settlements')
-        c.execute('DELETE FROM users')
-        conn.commit()
+        clear_all_expenses()
+        ws = get_worksheet('users')
+        ws.clear()
+        ws.append_row(['id', 'name'])
+        st.cache_data.clear()
         return True
     except Exception as e:
-        print(f"Error clearing database: {e}")
-        conn.rollback()
+        print(f"Error clearing users: {e}")
         return False
-    finally:
-        conn.close()
 
 def delete_user(user_id):
-    conn = get_connection()
-    c = conn.cursor()
     try:
-        c.execute('DELETE FROM expense_splits WHERE expense_id IN (SELECT id FROM expenses WHERE payer_id = ?)', (user_id,))
-        c.execute('DELETE FROM expenses WHERE payer_id = ?', (user_id,))
-        c.execute('DELETE FROM expense_splits WHERE user_id = ?', (user_id,))
-        c.execute('DELETE FROM settlements WHERE payer_id = ? OR payee_id = ?', (user_id, user_id))
-        c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-        conn.commit()
+        exp_ws = get_worksheet('expenses')
+        splits_ws = get_worksheet('expense_splits')
+        settlements_ws = get_worksheet('settlements')
+        users_ws = get_worksheet('users')
+        
+        all_exps = exp_ws.get_all_values()
+        user_expense_ids = []
+        exp_rows_to_delete = []
+        for i, row in enumerate(all_exps):
+            if i == 0: continue
+            if row[3] and str(row[3]).isdigit() and int(row[3]) == int(user_id):
+                user_expense_ids.append(int(row[0]))
+                exp_rows_to_delete.append(i + 1)
+                
+        all_splits = splits_ws.get_all_values()
+        split_rows_to_delete = []
+        for i, row in enumerate(all_splits):
+            if i == 0: continue
+            if row[1] and str(row[1]).isdigit() and int(row[1]) in user_expense_ids:
+                split_rows_to_delete.append(i + 1)
+            elif row[2] and str(row[2]).isdigit() and int(row[2]) == int(user_id):
+                if (i+1) not in split_rows_to_delete:
+                    split_rows_to_delete.append(i + 1)
+                
+        all_sets = settlements_ws.get_all_values()
+        set_rows_to_delete = []
+        for i, row in enumerate(all_sets):
+            if i == 0: continue
+            if (row[1] and str(row[1]).isdigit() and int(row[1]) == int(user_id)) or \
+               (row[2] and str(row[2]).isdigit() and int(row[2]) == int(user_id)):
+                set_rows_to_delete.append(i + 1)
+                
+        all_users = users_ws.get_all_values()
+        user_rows_to_delete = []
+        for i, row in enumerate(all_users):
+            if i == 0: continue
+            if row[0] and str(row[0]).isdigit() and int(row[0]) == int(user_id):
+                user_rows_to_delete.append(i+1)
+                
+        for r_idx in sorted(split_rows_to_delete, reverse=True):
+            splits_ws.delete_rows(r_idx)
+        for r_idx in sorted(exp_rows_to_delete, reverse=True):
+            exp_ws.delete_rows(r_idx)
+        for r_idx in sorted(set_rows_to_delete, reverse=True):
+            settlements_ws.delete_rows(r_idx)
+        for r_idx in sorted(user_rows_to_delete, reverse=True):
+            users_ws.delete_rows(r_idx)
+            
+        st.cache_data.clear()
         return True
     except Exception as e:
         print(f"Error deleting user: {e}")
-        conn.rollback()
         return False
-    finally:
-        conn.close()
