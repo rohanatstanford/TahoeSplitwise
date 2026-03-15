@@ -24,19 +24,19 @@ def get_client():
             creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
         else:
             # Fallback to streamlit secrets when deployed
-            creds_data = {
-                "type": st.secrets["gcp_service_account"]["type"],
-                "project_id": st.secrets["gcp_service_account"]["project_id"],
-                "private_key_id": st.secrets["gcp_service_account"]["private_key_id"],
-                "private_key": st.secrets["gcp_service_account"]["private_key"].replace("\\n", "\n"),
-                "client_email": st.secrets["gcp_service_account"]["client_email"],
-                "client_id": st.secrets["gcp_service_account"]["client_id"],
-                "auth_uri": st.secrets["gcp_service_account"]["auth_uri"],
-                "token_uri": st.secrets["gcp_service_account"]["token_uri"],
-                "auth_provider_x509_cert_url": st.secrets["gcp_service_account"]["auth_provider_x509_cert_url"],
-                "client_x509_cert_url": st.secrets["gcp_service_account"]["client_x509_cert_url"],
-                "universe_domain": st.secrets["gcp_service_account"].get("universe_domain", "googleapis.com")
-            }
+            import json
+            secrets_val = st.secrets["gcp_service_account"]
+            
+            # If the user pasted it as a raw string in Streamlit Secrets
+            if isinstance(secrets_val, str):
+                creds_data = json.loads(secrets_val)
+            else:
+                # If they pasted it as a TOML dictionary
+                creds_data = dict(secrets_val)
+                if "private_key" in creds_data:
+                    # Ensure literal string \n are parsed as actual newlines
+                    creds_data["private_key"] = creds_data["private_key"].replace("\\n", "\n")
+            
             creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
             
         _client = gspread.authorize(creds)
